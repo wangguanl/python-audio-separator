@@ -505,7 +505,13 @@ class Separator:
             self.logger.debug(f"File already exists at {output_path}, skipping download")
             return
 
-        self.logger.debug(f"Downloading file from {url} to {output_path} with timeout 300s")
+        # Route GitHub downloads through a mirror proxy to speed up downloads in regions
+        # where GitHub is slow. Override via the GH_MIRROR env var, e.g. https://ghfast.top/
+        mirror_prefix = os.environ.get("GH_MIRROR", "https://ghfast.top/")
+        if (url.startswith("https://github.com/") or url.startswith("https://raw.githubusercontent.com/")) and not url.startswith(mirror_prefix):
+            url = mirror_prefix + url
+
+        self.logger.info(f"Downloading file from {url} to {output_path} with timeout 300s")
         response = requests.get(url, stream=True, timeout=300)
 
         if response.status_code == 200:
