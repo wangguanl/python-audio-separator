@@ -7,6 +7,8 @@ import importlib.metadata
 from unittest import mock
 from unittest.mock import patch, MagicMock, mock_open
 
+from audio_separator.separator.exceptions import AudioExportError
+
 
 # Mock metadata.distribution for tests to avoid PackageNotFoundError in environment without installed package
 @pytest.fixture(autouse=True)
@@ -41,6 +43,8 @@ def common_expected_args():
         "sample_rate": 44100,
         "use_soundfile": False,
         "use_autocast": False,
+        "use_native_fp16": False,
+        "use_torch_compile": False,
         "use_directml": False,
         "chunk_duration": None,
         "ensemble_algorithm": None,
@@ -49,7 +53,7 @@ def common_expected_args():
         "mdx_params": {"hop_length": 1024, "segment_size": 256, "overlap": 0.25, "batch_size": 1, "enable_denoise": False},
         "vr_params": {"batch_size": 1, "window_size": 512, "aggression": 5, "enable_tta": False, "enable_post_process": False, "post_process_threshold": 0.2, "high_end_process": False},
         "demucs_params": {"segment_size": "Default", "shifts": 2, "overlap": 0.25, "segments_enabled": True},
-        "mdxc_params": {"segment_size": 256, "batch_size": 1, "overlap": 8, "override_model_segment_size": False, "pitch_shift": 0},
+        "mdxc_params": {"segment_size": 256, "batch_size": None, "overlap": None, "override_model_segment_size": False, "pitch_shift": 0},
     }
 
 
@@ -61,8 +65,15 @@ def test_cli_version_subprocess():
 
 # Test the CLI with no arguments
 def test_cli_no_args(capsys):
-    # Skip subprocess CLI tests - require proper CLI installation  
-    pytest.skip("CLI subprocess tests require proper installation")
+    test_args = ["cli.py"]
+
+    with patch("sys.argv", test_args), patch.dict("sys.modules", {"audio_separator.separator": None}):
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+
+    assert exc_info.value.code == 1
+    captured = capsys.readouterr()
+    assert "Separate audio file into different stems." in captured.out
 
 
 # Test with multiple filename arguments
@@ -94,6 +105,19 @@ def test_cli_multiple_filenames():
         log_messages = [call[0][0] for call in mock_logger.info.call_args_list]
         assert any("test1.mp3" in msg and "test2.mp3" in msg for msg in log_messages)
         assert any("Separation complete" in msg for msg in log_messages)
+
+
+def test_cli_exits_one_when_audio_export_fails():
+    test_args = ["cli.py", "bad.wav"]
+    export_error = AudioExportError("writer failed", path="bad_(Vocals).flac", backend="pydub")
+
+    with patch("sys.argv", test_args), patch("audio_separator.separator.Separator") as separator_class:
+        separator_class.return_value.separate.side_effect = export_error
+
+        with pytest.raises(SystemExit) as raised:
+            main()
+
+    assert raised.value.code == 1
 
 
 # Test the CLI with a specific audio file
@@ -255,6 +279,78 @@ def test_cli_use_autocast_argument(common_expected_args):
             expected_args["use_autocast"] = True
 
             # Assertions
+            mock_separator.assert_called_once_with(**expected_args)
+
+
+def test_cli_use_native_fp16_argument(common_expected_args):
+    test_args = ["cli.py", "test_audio.mp3", "--use_native_fp16"]
+    with patch("sys.argv", test_args):
+        with patch("audio_separator.separator.Separator") as mock_separator:
+            mock_separator_instance = mock_separator.return_value
+            mock_separator_instance.separate.return_value = ["output_file.mp3"]
+            main()
+
+            expected_args = common_expected_args.copy()
+            expected_args["use_native_fp16"] = True
+
+            mock_separator.assert_called_once_with(**expected_args)
+
+
+def test_cli_rejects_multiple_precision_modes():
+    test_args = ["cli.py", "test_audio.mp3", "--use_autocast", "--use_native_fp16"]
+
+    with patch("sys.argv", test_args), pytest.raises(SystemExit, match="2"):
+        main()
+
+
+@pytest.mark.parametrize(
+    ("precision_flag", "expected_key"),
+    [
+        ("--use_autocast", "use_autocast"),
+        ("--use_native_fp16", "use_native_fp16"),
+    ],
+)
+def test_cli_precision_mode_can_be_combined_with_torch_compile(
+    common_expected_args,
+    precision_flag,
+    expected_key,
+):
+    test_args = ["cli.py", "test_audio.mp3", precision_flag, "--use_torch_compile"]
+
+    with patch("sys.argv", test_args), patch("audio_separator.separator.Separator") as mock_separator:
+        mock_separator.return_value.separate.return_value = ["output_file.mp3"]
+        main()
+
+    expected_args = common_expected_args.copy()
+    expected_args[expected_key] = True
+    expected_args["use_torch_compile"] = True
+    mock_separator.assert_called_once_with(**expected_args)
+
+
+def test_cli_rejects_multiple_precision_modes_even_with_torch_compile():
+    test_args = [
+        "cli.py",
+        "test_audio.mp3",
+        "--use_autocast",
+        "--use_native_fp16",
+        "--use_torch_compile",
+    ]
+
+    with patch("sys.argv", test_args), pytest.raises(SystemExit, match="2"):
+        main()
+
+
+def test_cli_use_torch_compile_argument(common_expected_args):
+    test_args = ["cli.py", "test_audio.mp3", "--use_torch_compile"]
+    with patch("sys.argv", test_args):
+        with patch("audio_separator.separator.Separator") as mock_separator:
+            mock_separator_instance = mock_separator.return_value
+            mock_separator_instance.separate.return_value = ["output_file.mp3"]
+            main()
+
+            expected_args = common_expected_args.copy()
+            expected_args["use_torch_compile"] = True
+
             mock_separator.assert_called_once_with(**expected_args)
 
 

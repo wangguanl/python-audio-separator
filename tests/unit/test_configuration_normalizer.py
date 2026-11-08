@@ -184,6 +184,7 @@ class TestConfigurationNormalizer:
         config = {
             'dim': '512',
             'depth': '12.0',  # Float string to int
+            'linear_transformer_depth': '1',
             'sample_rate': 44100.0,  # Float to int
             'attn_dropout': '0.1',
             'ff_dropout': 0.2
@@ -193,6 +194,7 @@ class TestConfigurationNormalizer:
         
         assert result['dim'] == 512
         assert result['depth'] == 12
+        assert result['linear_transformer_depth'] == 1
         assert result['sample_rate'] == 44100
         assert result['attn_dropout'] == 0.1
         assert result['ff_dropout'] == 0.2
@@ -200,6 +202,7 @@ class TestConfigurationNormalizer:
         # Check types
         assert isinstance(result['dim'], int)
         assert isinstance(result['depth'], int)
+        assert isinstance(result['linear_transformer_depth'], int)
         assert isinstance(result['sample_rate'], int)
         assert isinstance(result['attn_dropout'], float)
         assert isinstance(result['ff_dropout'], float)
@@ -309,6 +312,7 @@ class TestConfigurationNormalizer:
         file_paths = [
             '/path/to/mel_band_roformer_model.ckpt',
             '/path/to/MelBand-Roformer-model.pth',
+            '/path/to/mel-roformer-vocals.ckpt',
             '/path/to/model_mel_roformer.bin'
         ]
         
@@ -319,7 +323,101 @@ class TestConfigurationNormalizer:
             
             # Should have MelBandRoformer defaults
             assert result['num_bands'] == 64, f"Failed for path: {file_path}"
-    
+
+    def test_nested_mel_config_is_not_overridden_by_parent_directory(self):
+        """A checkpoint's parent directory must not override its configured model family."""
+        config = {
+            'model': {
+                'dim': 384,
+                'depth': 12,
+                'num_bands': 60,
+            }
+        }
+
+        result = self.normalizer.normalize_from_file_path(
+            config,
+            '/tmp/absolute/roformer/mel_band_roformer_karaoke.ckpt',
+            apply_defaults=True,
+            validate=False,
+        )
+
+        assert result['num_bands'] == 60
+        assert 'freqs_per_bands' not in result
+
+    @pytest.mark.parametrize(
+        ('config', 'filename', 'expected_key', 'unexpected_key'),
+        [
+            (
+                {'model': {'dim': 384, 'depth': 12, 'num_bands': 60}},
+                'BS-Roformer-SW.ckpt',
+                'num_bands',
+                'freqs_per_bands',
+            ),
+            (
+                {'model': {'dim': 384, 'depth': 12, 'freqs_per_bands': (2, 4, 8, 16)}},
+                'mel_band_roformer_karaoke.ckpt',
+                'freqs_per_bands',
+                'num_bands',
+            ),
+        ],
+    )
+    def test_config_structure_overrides_conflicting_checkpoint_basename(
+        self,
+        config,
+        filename,
+        expected_key,
+        unexpected_key,
+    ):
+        """Architecture-defining config is authoritative when a checkpoint is renamed."""
+        result = self.normalizer.normalize_from_file_path(
+            config,
+            f'/tmp/{filename}',
+            apply_defaults=True,
+            validate=False,
+        )
+
+        assert expected_key in result
+        assert unexpected_key not in result
+
+    @pytest.mark.parametrize('section_name', ['model', 'architecture', 'params'])
+    def test_detect_model_type_flattens_supported_nested_sections(self, section_name):
+        """All supported nested config layouts expose their structural family marker."""
+        config = {section_name: {'num_bands': 60}}
+
+        assert self.normalizer.detect_model_type(config) == 'mel_band_roformer'
+
+    def test_detect_model_type_rejects_conflicting_structural_markers(self):
+        """A config that describes both Roformer families must fail before defaults are applied."""
+        config = {
+            'model': {
+                'num_bands': 60,
+                'freqs_per_bands': (2, 4, 8, 16, 32, 64),
+            }
+        }
+
+        with pytest.raises(ParameterValidationError, match='num_bands, freqs_per_bands'):
+            self.normalizer.detect_model_type(config)
+
+    def test_detect_model_type_rejects_explicit_type_that_conflicts_with_structure(self):
+        """An explicit family must agree with the architecture-defining parameters."""
+        config = {
+            'model_type': 'bs_roformer',
+            'model': {'num_bands': 60},
+        }
+
+        with pytest.raises(ParameterValidationError, match='model_type, num_bands'):
+            self.normalizer.detect_model_type(config)
+
+    def test_detect_model_type_rejects_conflicting_explicit_types(self):
+        """All recognized explicit family fields must agree."""
+        config = {
+            'model_type': 'bs_roformer',
+            'type': 'mel_band_roformer',
+        }
+
+        with pytest.raises(ParameterValidationError, match='model_type, type'):
+            self.normalizer.detect_model_type(config)
+
     def test_normalize_from_file_path_default_fallback(self):
         """Test normalization with file path detection - default fallback."""
         config = {
